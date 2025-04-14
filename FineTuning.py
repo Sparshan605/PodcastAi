@@ -1,188 +1,110 @@
 import torch
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    BitsAndBytesConfig,
-    TrainingArguments,
-    Trainer
-)
 from datasets import load_dataset
-from peft import get_peft_model, LoraConfig, TaskType
+from transformers import TrainingArguments
+from peft import LoraConfig, TaskType, get_peft_model
+import os
+import logging
 
-# Load tokenizer
-model_name = "mistralai/Mistral-7B-Instruct-v0.2"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+# Enable debug logging
+logging.basicConfig(level=logging.DEBUG)
 
-# 4-bit quantization config
-bnb_config = BitsAndBytesConfig(
+# Output directory for model and checkpoints
+output_dir = "mistral7b-podcast"
+os.makedirs(output_dir, exist_ok=True)
+
+# Check for GPU
+if not torch.cuda.is_available():
+    raise SystemError("CUDA GPU is required for Unsloth 4-bit training")
+
+# --- Unsloth imports ---
+import unsloth
+from unsloth import FastMistralModel
+from trl import SFTTrainer
+
+# Load model with Unsloth (4-bit)
+print("Loading Mistral 7B with Unsloth...")
+model, tokenizer = FastMistralModel.from_pretrained(
+    model_name="mistralai/Mistral-7B-Instruct-v0.2",
+    max_seq_length=2048,
     load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_compute_dtype=torch.bfloat16  # or torch.float16
+)
+print("Model loaded.")
+
+# Apply LoRA
+if hasattr(FastMistralModel, "get_peft_model"):
+    model = FastMistralModel.get_peft_model(
+        model,
+        r=8,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "down_proj", "up_proj"],
+        bias="none",
+    )
+else:
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "down_proj", "up_proj"],
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
+    )
+    model = get_peft_model(model, lora_config)
+
+# Load dataset (you can reduce split size to speed it up)
+print("Loading dataset from Unsloth_data.jsonl")
+dataset = load_dataset(
+    "json", 
+    data_files="/content/Unsloth_data.jsonl", 
+    split="train[:1000]",
 )
 
-# Load model with quantization
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    quantization_config=bnb_config,
-    device_map="auto"
-)
+# Format dataset for instruction tuning
+def format_for_unsloth(example):
+    return {
+        "text": f"<s>[INST] {example['prompt']} [/INST] {example['completion']}</s>"
+    }
 
-# Load dataset
-dataset = load_dataset("json", data_files="Unsloth_data.jsonl", split="train")
-
-# LoRA config
-lora_config = LoraConfig(
-    r=8,
-    lora_alpha=32,
-    lora_dropout=0.05,
-    task_type=TaskType.CAUSAL_LM
-)
-peft_model = get_peft_model(model, lora_config)
+formatted_dataset = dataset.map(format_for_unsloth, remove_columns=dataset.column_names)
 
 # Training arguments
 training_args = TrainingArguments(
-    output_dir="./mistral7b-podcast-finetune",
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=8,  # simulate bigger batch size
-    num_train_epochs=2,
-    learning_rate=2e-4,
-    save_strategy="epoch",
+    output_dir=output_dir,
+    per_device_train_batch_size=2,  
+    gradient_accumulation_steps=2,
+    learning_rate=5e-5,
+    num_train_epochs=1,  
+    save_strategy="steps",
+    save_steps=250,
     save_total_limit=1,
-    report_to="none",
+    logging_steps=10,
     fp16=True,
-    logging_steps=10
+    optim="adamw_torch",
+    logging_dir=f"{output_dir}/logs",
+    resume_from_checkpoint=True,
 )
 
-# Trainer
-trainer = Trainer(
-    model=peft_model,
-    args=training_args,
-    train_dataset=dataset,
-    tokenizer=tokenizer
-)
+# Trainer selection
+if hasattr(unsloth, "UnslothTrainer"):
+    from unsloth import UnslothTrainer
+    print("Using UnslothTrainer")
+    trainer = UnslothTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        args=training_args,
+        train_dataset=formatted_dataset,
+        max_seq_length=2048,
+        formatting_func=None,
+    )
 
-# Train
+# Train the model
+print("Training started")
 trainer.train()
 
-# Save model
-peft_model.save_pretrained("mistral7b-podcast-finetune")
-tokenizer.save_pretrained("mistral7b-podcast-finetune")
-
-
-# from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer
-# from datasets import load_dataset
-# from peft import get_peft_model, LoraConfig, TaskType
-# import os
-# import logging
-
-# # Set logging to debug level
-# logging.basicConfig(level=logging.DEBUG)
-
-# # Ensure output directory exists
-# output_dir = "mistral7b-podcast-finetune"
-# if not os.path.exists(output_dir):
-#     os.makedirs(output_dir)
-
-# # Check for NVIDIA GPU
-# if torch.cuda.is_available():
-#     from unsloth import FastLanguageModel
-
-#     # Load with Unsloth's fast loading and 4bit quantization
-#     print("Loading model with Unsloth fast loading...")
-#     model, tokenizer = FastLanguageModel.from_pretrained(
-#         model_name="mistralai/Mistral-7B-Instruct-v0.2",
-#         max_seq_length=2048,  # Adjust as needed
-#         load_in_4bit=True,  # Enable 4-bit quantization
-#     )
-#     print("Model loaded with Unsloth.")
-
-#     lora_config = LoraConfig(
-#         r=8,
-#         lora_alpha=32,
-#         lora_dropout=0.1,
-#         target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "down_proj", "up_proj"],
-#         bias="none",
-#         task_type="CAUSAL_LM",
-#     )
-
-#     model = FastLanguageModel.get_peft_model(model, lora_config)
-#     model = FastLanguageModel.for_inference(model)
-
-#     print("Setting up trainer...")
-#     trainer = FastLanguageModel.get_trainer(
-#         model=model,
-#         tokenizer=tokenizer,
-#         dataset=load_dataset("json", data_files="Unsloth_data.jsonl", split="train"),
-#         output_dir=output_dir,
-#         max_seq_length=2048,
-#         per_device_train_batch_size=1,
-#         gradient_accumulation_steps=4,
-#         learning_rate=2e-4,
-#         num_train_epochs=2,
-#         save_strategy="epoch",
-#         save_total_limit=1,
-#         logging_steps=10,
-#     )
-
-# else:
-#     # CPU fallback (very slow)
-#     model_name = "mistralai/Mistral-7B-Instruct-v0.2"
-#     print("Loading model from Hugging Face...")
-#     tokenizer = AutoTokenizer.from_pretrained(model_name)
-#     model = AutoModelForCausalLM.from_pretrained(model_name)
-#     print("Model loaded from Hugging Face.")
-
-#     # Check model loading
-#     inputs = tokenizer("This is a test input", return_tensors="pt")
-#     with torch.no_grad():
-#         outputs = model.generate(inputs['input_ids'])
-#     print("Model inference test successful, generated output:", tokenizer.decode(outputs[0]))
-
-#     lora_config = LoraConfig(
-#         r=8,
-#         lora_alpha=32,
-#         lora_dropout=0.1,
-#         task_type=TaskType.CAUSAL_LM,
-#     )
-
-#     model = get_peft_model(model, lora_config)
-
-#     # Loading the dataset and printing the first 5 entries to verify
-#     dataset = load_dataset("json", data_files="Unsloth_data.jsonl", split="train")
-#     print("Dataset loaded:", dataset[:5])  # Print first 5 data entries
-
-#     print("Setting up trainer...")
-#     trainer = Trainer(
-#         model=model,
-#         args=TrainingArguments(
-#             output_dir=output_dir,
-#             per_device_train_batch_size=1,
-#             gradient_accumulation_steps=4,
-#             num_train_epochs=2,
-#             learning_rate=2e-4,
-#             save_strategy="epoch",
-#             save_total_limit=1,
-#             report_to="none",
-#             logging_steps=10,
-#             fp16=False,
-#             load_best_model_at_end=True,
-#             no_cuda=True,
-#         ),
-#         train_dataset=dataset,
-#         tokenizer=tokenizer,
-#     )
-
-#     print("Starting training...")
-#     try:
-#         trainer.train()
-#         print("Training finished.")
-#     except Exception as e:
-#         print(f"Error during training: {e}")
-
-#     model.save_pretrained(output_dir)
-#     tokenizer.save_pretrained(output_dir)
-#     print("Model and tokenizer saved!")
+# Save final model + tokenizer
+model.save_pretrained(output_dir)
+tokenizer.save_pretrained(output_dir)
+print("Model and tokenizer saved to:", output_dir)
 
 
 
