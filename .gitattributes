@@ -4,3 +4,4 @@ mistral7b-podcast/adapter_model.safetensors filter=lfs diff=lfs merge=lfs -text
 mistral7b-podcast/checkpoint-250/optimizer.pt filter=lfs diff=lfs merge=lfs -text
 mistral7b-podcast/checkpoint-250/optimizer.pt filter=lfs diff=lfs merge=lfs -text
 mistral7b-podcast/checkpoint-250/adapter_model.safetensors filter=lfs diff=lfs merge=lfs -text
+mistral7b-podcast filter=lfs diff=lfs merge=lfs -text
